@@ -435,8 +435,10 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
     const bool v4dot3OrGreater = IsGameV4Dot3OrGreater(processPath);
     std::uintptr_t address = 0;
     if (v4dot3OrGreater) {
+        std::wcout << "Current game version >= V4.3.0" << std::endl;
         address = PatternScan(ua, "B9 3C 00 00 00 FF 15");
     } else {
+        std::wcout << "Current game version >= V4.0.0 but < V4.3.0" << std::endl;
         address = PatternScan(ua, "E8 ? ? ? ? 85 C0 7E 07 E8 ? ? ? ? EB 05");
     }
     if (!address) {
