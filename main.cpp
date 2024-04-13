@@ -1,8 +1,3 @@
-#define UNICODE
-#define _UNICODE
-#define WIN32_LEAN_AND_MEAN
-#define WINRT_LEAN_AND_MEAN
-
 #include <windows.h>
 #include <shellapi.h>
 #include <combaseapi.h>
@@ -22,6 +17,8 @@ namespace fs = std::filesystem;
 using namespace std::chrono;
 
 static constexpr const auto kFPS_TARGET = std::int32_t{ 500 };
+
+static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
 
 [[nodiscard]] static inline std::uintptr_t PatternScan(const void* module, const char* signature)
 {
@@ -174,10 +171,140 @@ static constexpr const auto kFPS_TARGET = std::int32_t{ 500 };
     return ::ShellExecuteExW(&sei);
 }
 
+// Helper for reading out PE executable files: return word size of a IMAGE_NT_HEADERS64, IMAGE_NT_HEADERS32
+template <typename ImageNtHeader>
+[[nodiscard]] static inline std::uint32_t ntHeaderWordSize(const ImageNtHeader *ntHeader)
+{
+#if 1
+    switch (ntHeader->OptionalHeader.Magic) {
+        case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
+            return 32;
+        case IMAGE_NT_OPTIONAL_HDR64_MAGIC:
+            return 64;
+        default:
+            break;
+    }
+#else
+    switch (ntHeader->FileHeader.Machine) {
+        case IMAGE_FILE_MACHINE_I386:
+            return 32;
+        case IMAGE_FILE_MACHINE_IA64:
+        case IMAGE_FILE_MACHINE_AMD64:
+        case IMAGE_FILE_MACHINE_ARM64:
+            return 64;
+        default:
+            break;
+    }
+#endif
+    return 0;
+}
+
+// Helper for reading out PE executable files: Retrieve the NT image header of an
+// executable via the legacy DOS header.
+[[nodiscard]] static inline IMAGE_NT_HEADERS *getNtHeader(void *fileMemory)
+{
+    const auto dosHeader = static_cast<PIMAGE_DOS_HEADER>(fileMemory);
+    // Check DOS header consistency
+    if (::IsBadReadPtr(dosHeader, sizeof(IMAGE_DOS_HEADER))
+        || dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
+        std::wcerr << "DOS header check failed." << std::endl;
+        return nullptr;
+    }
+    // Retrieve NT header
+    const auto ntHeaderC = static_cast<char *>(fileMemory) + dosHeader->e_lfanew;
+    const auto ntHeaders = reinterpret_cast<IMAGE_NT_HEADERS *>(ntHeaderC);
+    // Check NT header consistency
+    if (::IsBadReadPtr(ntHeaders, sizeof(ntHeaders->Signature))
+        || ntHeaders->Signature != IMAGE_NT_SIGNATURE
+        || ::IsBadReadPtr(&ntHeaders->FileHeader, sizeof(IMAGE_FILE_HEADER))) {
+        std::wcerr << "NT header check failed." << std::endl;
+        return nullptr;
+    }
+    // Check magic
+    if (ntHeaderWordSize(ntHeaders) == 0) {
+        std::wcerr << "NT header check failed, magic " << ntHeaders->OptionalHeader.Magic << " is invalid." << std::endl;
+        return nullptr;
+    }
+    // Check section headers
+    IMAGE_SECTION_HEADER *sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
+    if (::IsBadReadPtr(sectionHeaders, ntHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER))) {
+        std::wcerr << "NT header section header check failed." << std::endl;
+        return nullptr;
+    }
+    return ntHeaders;
+}
+
 [[nodiscard]] static inline bool IsGameV4Dot3OrGreater(const std::wstring &path)
 {
-    // FIXME: how to detect it accurately?
-    return false;
+    HANDLE hFile = nullptr;
+    HANDLE hFileMap = nullptr;
+    void *fileMemory = nullptr;
+    DWORD dwTimeStamp = 0;
+
+    do {
+        hFile = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (!hFile || hFile == INVALID_HANDLE_VALUE) {
+            std::wcerr << "Failed to open file: " << GetLastErrorAsString() << std::endl;
+            break;
+        }
+
+        hFileMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
+        if (!hFileMap || hFileMap == INVALID_HANDLE_VALUE) {
+            std::wcerr << "Failed to create file mapping: " << GetLastErrorAsString() << std::endl;
+            break;
+        }
+
+        fileMemory = ::MapViewOfFile(hFileMap, FILE_MAP_READ, 0, 0, 0);
+        if (!fileMemory) {
+            std::wcerr << "Failed to map file: " << GetLastErrorAsString() << std::endl;
+            break;
+        }
+
+        const IMAGE_NT_HEADERS *ntHeaders = getNtHeader(fileMemory);
+        if (!ntHeaders) {
+            std::wcerr << "Failed to parse PE file NT headers." << std::endl;
+            break;
+        }
+
+        const std::uint32_t wordSize = ntHeaderWordSize(ntHeaders);
+        if (wordSize == 0) {
+            std::wcerr << "Failed to parse PE file word size." << std::endl;
+            break;
+        }
+
+        if (wordSize == 32) {
+            std::wcout << "Parsing 32-bit PE file ..." << std::endl;
+            dwTimeStamp = reinterpret_cast<const IMAGE_NT_HEADERS32 *>(ntHeaders)->FileHeader.TimeDateStamp;
+        } else {
+            std::wcout << "Parsing 64-bit PE file ..." << std::endl;
+            dwTimeStamp = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(ntHeaders)->FileHeader.TimeDateStamp;
+        }
+
+        std::wcout << "PE file time date stamp: " << std::hex << dwTimeStamp << std::endl;
+    } while (false);
+
+    if (fileMemory) {
+        ::UnmapViewOfFile(fileMemory);
+        fileMemory = nullptr;
+    }
+
+    if (hFileMap) {
+        ::CloseHandle(hFileMap);
+        hFileMap = nullptr;
+    }
+
+    if (hFile) {
+        ::CloseHandle(hFile);
+        hFile = nullptr;
+    }
+
+    if (dwTimeStamp == 0) {
+        std::wcerr << "Failed to parse the game executable's time date stamp." << std::endl;
+        return false;
+    }
+
+    return dwTimeStamp >= kGame_4_3_0_TDS;
 }
 
 extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
@@ -198,6 +325,18 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
 
     ::SetConsoleCP(CP_UTF8);
     ::SetConsoleOutputCP(CP_UTF8);
+
+    const auto initConsole = [](const HANDLE handle){
+        if (!handle || handle == INVALID_HANDLE_VALUE) {
+            return;
+        }
+        DWORD dwMode{ 0 };
+        ::GetConsoleMode(handle, &dwMode);
+        dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        ::SetConsoleMode(handle, dwMode);
+    };
+    initConsole(::GetStdHandle(STD_OUTPUT_HANDLE));
+    initConsole(::GetStdHandle(STD_ERROR_HANDLE));
 
     ::SetConsoleTitleW(L"Genshin Impact FPS Unlocker");
     

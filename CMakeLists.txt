@@ -1,9 +1,9 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.28)
 
-project(GI-FPS-Unlocker VERSION "1.0.0" LANGUAGES CXX)
+project(GI-FPS-Unlocker VERSION "1.1.0" LANGUAGES CXX RC)
 
 if(NOT DEFINED CMAKE_BUILD_TYPE AND NOT DEFINED CMAKE_CONFIGURATION_TYPES)
-    set(CMAKE_BUILD_TYPE Release)
+    set(CMAKE_BUILD_TYPE "Release")
 endif()
 
 set(CMAKE_CXX_STANDARD 20)
@@ -12,7 +12,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+endif()
+
+if(MSVC)
+    set(CMAKE_RC_FLAGS "-c65001 -DWIN32 -nologo")
+endif()
 
 find_package(qmsetup QUIET)
 if(NOT TARGET qmsetup::library)
@@ -56,26 +62,43 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     VERSION "${PROJECT_VERSION}"
 )
 
-if(WIN32)
-    set(_desc "FPS unlocker for a certain anime game")
-    qm_add_win_rc_enhanced(${PROJECT_NAME}
-        NAME "Genshin Impact FPS Unlocker"
-        VERSION "${PROJECT_VERSION}"
-        DESCRIPTION "${_desc}"
-        COPYRIGHT "MIT License"
-        COMPANY "wangwenx190"
-        COMMENTS "XX, start!"
-        ICONS "${CMAKE_CURRENT_SOURCE_DIR}/icon/app.ico"
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    WIN32_LEAN_AND_MEAN WINRT_LEAN_AND_MEAN
+    UNICODE _UNICODE
+    _USE_MATH_DEFINES
+    NOMINMAX
+)
+
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        /options:strict /FS /MP /utf-8 /Zc:__cplusplus /permissive-
+        /guard:cf /guard:ehcont /Qspectre-jmp /Qspectre-load-cf
+        $<$<NOT:$<CONFIG:Debug>>:/Gw /Gy /Zc:inline>
     )
-    qm_add_win_manifest(${PROJECT_NAME} UTF8
-        NAME "org.wangwenx190.GenshinImpactFPSUnlocker"
-        DESCRIPTION "${_desc}"
+    target_link_options(${PROJECT_NAME} PRIVATE
+        /DYNAMICBASE /FIXED:NO /NXCOMPAT /HIGHENTROPYVA /TSAWARE
+        /LARGEADDRESSAWARE /CETCOMPAT /GUARD:CF /guard:ehcont /WX
+        $<$<NOT:$<CONFIG:Debug>>:/OPT:REF /OPT:ICF /OPT:LBR>
     )
 endif()
 
+set(_desc "FPS unlocker for a certain anime game")
+qm_add_win_rc_enhanced(${PROJECT_NAME}
+    NAME "Genshin Impact FPS Unlocker"
+    VERSION "${PROJECT_VERSION}"
+    DESCRIPTION "${_desc}"
+    COPYRIGHT "MIT License"
+    COMPANY "wangwenx190"
+    COMMENTS "XX, start!"
+    ICONS "${CMAKE_CURRENT_SOURCE_DIR}/icon/app.ico"
+)
+qm_add_win_manifest(${PROJECT_NAME} UTF8
+    NAME "org.wangwenx190.GenshinImpactFPSUnlocker"
+    DESCRIPTION "${_desc}"
+)
+
 include(GNUInstallDirs)
-install(
-    TARGETS ${PROJECT_NAME}
+install(TARGETS ${PROJECT_NAME}
     BUNDLE  DESTINATION .
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
