@@ -313,7 +313,9 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
         std::vector<std::wstring> params{};
         params.reserve(argc - 1);
         for (int index = 1; index != argc; ++index) {
-            params.emplace_back(argv[index]);
+            std::wstring path{ argv[index] };
+            path = L"\"" + path + L"\"";
+            params.emplace_back(path);
         }
         RunAsElevated(argv[0], params);
         return EXIT_FAILURE;
@@ -363,7 +365,7 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
     const fs::path processDir = processPath.parent_path();
     const std::wstring fileName = processPath.filename();
 
-    std::wcout << "Genshin Impact FPS Unlocker V1.0.0" << std::endl;
+    std::wcout << "Genshin Impact FPS Unlocker V" << APP_VERSION_STR << std::endl;
     std::wcout << "Game path: " << processPath << std::endl;
 
     const DWORD pid = GetPID(fileName);
