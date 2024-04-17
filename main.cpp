@@ -10,18 +10,42 @@
 #include <chrono>
 #include <iostream>
 #include <clocale>
+#include <cassert>
 #include <filesystem>
 
 namespace fs = std::filesystem;
 
-using namespace std::chrono;
+using namespace std::chrono_literals;
 
-static constexpr const auto kFPS_TARGET = std::int32_t{ 500 };
-
+static constexpr const auto kFPS_TARGET = std::uint32_t{ 500 };
+static constexpr const auto kMaxRetryTimes = std::uint8_t{ 200 };
 static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
+
+static constexpr const char kVT_Color_Default[] = "\x1b[0m";
+static constexpr const char kVT_Color_Black[] = "\x1b[1;30m";
+static constexpr const char kVT_Color_Red[] = "\x1b[1;31m";
+static constexpr const char kVT_Color_Green[] = "\x1b[1;32m";
+static constexpr const char kVT_Color_Yellow[] = "\x1b[1;33m";
+static constexpr const char kVT_Color_Blue[] = "\x1b[1;34m";
+static constexpr const char kVT_Color_Magenta[] = "\x1b[1;35m";
+static constexpr const char kVT_Color_Cyan[] = "\x1b[1;36m";
+static constexpr const char kVT_Color_White[] = "\x1b[1;37m";
+
+#define PRINT(Message)   std::wcout                     << Message                      << std::endl
+#define SUCCESS(Message) std::wcout << kVT_Color_Green  << Message << kVT_Color_Default << std::endl
+#define WARN(Message)    std::wcerr << kVT_Color_Yellow << Message << kVT_Color_Default << std::endl
+#define ERROR(Message)   std::wcerr << kVT_Color_Red    << Message << kVT_Color_Default << std::endl
+#define NOTICE(Message)  std::wcout << kVT_Color_Cyan   << Message << kVT_Color_Default << std::endl
 
 [[nodiscard]] static inline std::uintptr_t PatternScan(const void* module, const char* signature)
 {
+    assert(module);
+    assert(signature);
+    assert(*signature != '\0');
+    if (!module || !signature || *signature == '\0') {
+        return 0;
+    }
+
     static const auto pattern_to_byte = [](const char* pattern) {
         auto bytes = std::vector<int>{};
         auto start = const_cast<char*>(pattern);
@@ -80,11 +104,15 @@ static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
 
 [[nodiscard]] static inline bool GetModule(const DWORD pid, const std::wstring &moduleName, PMODULEENTRY32W pEntry)
 {
+    assert(!moduleName.empty());
+    if (moduleName.empty()) {
+        return false;
+    }
     MODULEENTRY32W me32{};
     me32.dwSize = sizeof(me32);
     const HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
     if (!snap) {
-        std::wcerr << "CreateToolhelp32Snapshot failed: " << GetLastErrorAsString() << std::endl;
+        ERROR("CreateToolhelp32Snapshot failed: " << GetLastErrorAsString());
         return false;
     }
     bool found = false;
@@ -108,12 +136,16 @@ static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
 
 [[nodiscard]] static inline DWORD GetPID(const std::wstring &processName)
 {
+    assert(!processName.empty());
+    if (processName.empty()) {
+        return 0;
+    }
     DWORD pid = 0;
     PROCESSENTRY32W pe32{};
     pe32.dwSize = sizeof(pe32);
     const HANDLE snap = ::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (!snap) {
-        std::wcerr << "CreateToolhelp32Snapshot failed: " << GetLastErrorAsString() << std::endl;
+        ERROR("CreateToolhelp32Snapshot failed: " << GetLastErrorAsString());
         return 0;
     }
     for (::Process32FirstW(snap, &pe32); ::Process32NextW(snap, &pe32);)
@@ -153,6 +185,11 @@ static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
 
 [[nodiscard]] static inline bool RunAsElevated(const std::wstring &path, const std::vector<std::wstring> &params)
 {
+    assert(!path.empty());
+    if (path.empty()) {
+        return false;
+    }
+    const std::wstring workDir = fs::path(path).parent_path().wstring();
     ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
@@ -160,6 +197,7 @@ static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
     sei.fMask = SEE_MASK_NOASYNC;
     sei.nShow = SW_SHOW;
     sei.lpFile = path.c_str();
+    sei.lpDirectory = workDir.c_str();
     std::wstring args{};
     for (std::size_t index = 0; index != params.size(); ++index) {
         args += params.at(index);
@@ -175,6 +213,10 @@ static constexpr const auto kGame_4_3_0_TDS = DWORD{ 0x656FF9F9 };
 template <typename ImageNtHeader>
 [[nodiscard]] static inline std::uint32_t ntHeaderWordSize(const ImageNtHeader *ntHeader)
 {
+    assert(ntHeader);
+    if (!ntHeader) {
+        return 0;
+    }
 #if 1
     switch (ntHeader->OptionalHeader.Magic) {
         case IMAGE_NT_OPTIONAL_HDR32_MAGIC:
@@ -203,11 +245,15 @@ template <typename ImageNtHeader>
 // executable via the legacy DOS header.
 [[nodiscard]] static inline IMAGE_NT_HEADERS *getNtHeader(void *fileMemory)
 {
+    assert(fileMemory);
+    if (!fileMemory) {
+        return nullptr;
+    }
     const auto dosHeader = static_cast<PIMAGE_DOS_HEADER>(fileMemory);
     // Check DOS header consistency
     if (::IsBadReadPtr(dosHeader, sizeof(IMAGE_DOS_HEADER))
         || dosHeader->e_magic != IMAGE_DOS_SIGNATURE) {
-        std::wcerr << "DOS header check failed." << std::endl;
+        ERROR("DOS header check failed.");
         return nullptr;
     }
     // Retrieve NT header
@@ -217,18 +263,18 @@ template <typename ImageNtHeader>
     if (::IsBadReadPtr(ntHeaders, sizeof(ntHeaders->Signature))
         || ntHeaders->Signature != IMAGE_NT_SIGNATURE
         || ::IsBadReadPtr(&ntHeaders->FileHeader, sizeof(IMAGE_FILE_HEADER))) {
-        std::wcerr << "NT header check failed." << std::endl;
+        ERROR("NT header check failed.");
         return nullptr;
     }
     // Check magic
     if (ntHeaderWordSize(ntHeaders) == 0) {
-        std::wcerr << "NT header check failed, magic " << ntHeaders->OptionalHeader.Magic << " is invalid." << std::endl;
+        ERROR("NT header check failed, magic " << ntHeaders->OptionalHeader.Magic << " is invalid.");
         return nullptr;
     }
     // Check section headers
     IMAGE_SECTION_HEADER *sectionHeaders = IMAGE_FIRST_SECTION(ntHeaders);
     if (::IsBadReadPtr(sectionHeaders, ntHeaders->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER))) {
-        std::wcerr << "NT header section header check failed." << std::endl;
+        ERROR("NT header section header check failed.");
         return nullptr;
     }
     return ntHeaders;
@@ -236,6 +282,11 @@ template <typename ImageNtHeader>
 
 [[nodiscard]] static inline bool IsGameV4Dot3OrGreater(const std::wstring &path)
 {
+    assert(!path.empty());
+    if (path.empty()) {
+        return false;
+    }
+
     HANDLE hFile = nullptr;
     HANDLE hFileMap = nullptr;
     void *fileMemory = nullptr;
@@ -245,43 +296,43 @@ template <typename ImageNtHeader>
         hFile = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (!hFile || hFile == INVALID_HANDLE_VALUE) {
-            std::wcerr << "Failed to open file: " << GetLastErrorAsString() << std::endl;
+            ERROR("Failed to open file: " << GetLastErrorAsString());
             break;
         }
 
         hFileMap = ::CreateFileMappingW(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
         if (!hFileMap || hFileMap == INVALID_HANDLE_VALUE) {
-            std::wcerr << "Failed to create file mapping: " << GetLastErrorAsString() << std::endl;
+            ERROR("Failed to create file mapping: " << GetLastErrorAsString());
             break;
         }
 
         fileMemory = ::MapViewOfFile(hFileMap, FILE_MAP_READ, 0, 0, 0);
         if (!fileMemory) {
-            std::wcerr << "Failed to map file: " << GetLastErrorAsString() << std::endl;
+            ERROR("Failed to map file: " << GetLastErrorAsString());
             break;
         }
 
         const IMAGE_NT_HEADERS *ntHeaders = getNtHeader(fileMemory);
         if (!ntHeaders) {
-            std::wcerr << "Failed to parse PE file NT headers." << std::endl;
+            ERROR("Failed to parse PE file NT headers.");
             break;
         }
 
         const std::uint32_t wordSize = ntHeaderWordSize(ntHeaders);
         if (wordSize == 0) {
-            std::wcerr << "Failed to parse PE file word size." << std::endl;
+            ERROR("Failed to parse PE file word size.");
             break;
         }
 
         if (wordSize == 32) {
-            std::wcout << "Parsing 32-bit PE file ..." << std::endl;
+            PRINT("Parsing 32-bit PE file ...");
             dwTimeStamp = reinterpret_cast<const IMAGE_NT_HEADERS32 *>(ntHeaders)->FileHeader.TimeDateStamp;
         } else {
-            std::wcout << "Parsing 64-bit PE file ..." << std::endl;
+            PRINT("Parsing 64-bit PE file ...");
             dwTimeStamp = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(ntHeaders)->FileHeader.TimeDateStamp;
         }
 
-        std::wcout << "PE file time date stamp: " << std::hex << dwTimeStamp << std::endl;
+        PRINT("PE file time date stamp: 0x" << std::hex << dwTimeStamp);
     } while (false);
 
     if (fileMemory) {
@@ -300,11 +351,21 @@ template <typename ImageNtHeader>
     }
 
     if (dwTimeStamp == 0) {
-        std::wcerr << "Failed to parse the game executable's time date stamp." << std::endl;
+        ERROR("Failed to parse the game executable's time date stamp.");
         return false;
     }
 
     return dwTimeStamp >= kGame_4_3_0_TDS;
+}
+
+[[nodiscard]] static inline bool IsGenshinGame(const fs::path &path)
+{
+    assert(!path.empty());
+    if (path.empty()) {
+        return false;
+    }
+    const std::wstring gameFileName(path.filename().wstring());
+    return gameFileName == L"GenshinImpact.exe" || gameFileName == L"YuanShen.exe";
 }
 
 extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
@@ -314,7 +375,9 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
         params.reserve(argc - 1);
         for (int index = 1; index != argc; ++index) {
             std::wstring path{ argv[index] };
-            path = L"\"" + path + L"\"";
+            if (path.find_first_of(L' ') != std::wstring::npos) {
+                path = L"\"" + path + L"\"";
+            }
             params.emplace_back(path);
         }
         RunAsElevated(argv[0], params);
@@ -343,7 +406,7 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
     ::SetConsoleTitleW(L"Genshin Impact FPS Unlocker");
     
     if (argc <= 1) {
-        std::wcerr << "You need to add the absolute path of your game executable file to the command line parameters!" << std::endl;
+        ERROR("You need to add the absolute path of your game executable file to the command line parameters!");
         std::getchar();
         return EXIT_FAILURE;
     }
@@ -351,13 +414,19 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
     const fs::path processPath{ argv[argc - 1] };
 
     if (!fs::exists(processPath)) {
-        std::wcerr << processPath << " does not exist!" << std::endl;
+        ERROR(processPath << " does not exist!");
         std::getchar();
         return EXIT_FAILURE;
     }
 
     if (!fs::is_regular_file(processPath)) {
-        std::wcerr << processPath << " does not seem to be a regular file!" << std::endl;
+        ERROR(processPath << " does not seem to be an regular file!");
+        std::getchar();
+        return EXIT_FAILURE;
+    }
+
+    if (!IsGenshinGame(processPath)) {
+        ERROR(processPath << " does not seem to be the Genshin Impact game executable!");
         std::getchar();
         return EXIT_FAILURE;
     }
@@ -365,86 +434,100 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
     const fs::path processDir = processPath.parent_path();
     const std::wstring fileName = processPath.filename();
 
-    std::wcout << "Genshin Impact FPS Unlocker V" << APP_VERSION_STR << std::endl;
-    std::wcout << "Game path: " << processPath << std::endl;
+    NOTICE("Genshin Impact FPS Unlocker V" << APP_VERSION_STR);
+    PRINT("Game path: " << processPath);
 
     const DWORD pid = GetPID(fileName);
     if (pid) {
-        std::wcerr << "The game is running already, please close it. This program will run it automatically for you." << std::endl;
+        ERROR("The game is running already, please close it. This program will run it automatically for you.");
         std::getchar();
         return EXIT_FAILURE;
     }
 
-    std::wcout << "Launching game, please wait ..." << std::endl;
+    PRINT("Launching the game, please wait patiently ...");
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     if (!::CreateProcessW(processPath.c_str(), nullptr, nullptr, nullptr, FALSE, 0, nullptr, processDir.c_str(), &si, &pi))
     {
-        std::wcerr << "CreateProcessW failed: " << GetLastErrorAsString() << std::endl;
+        ERROR("CreateProcessW failed: " << GetLastErrorAsString());
         std::getchar();
         return EXIT_FAILURE;
     }
     ::CloseHandle(pi.hThread);
 
-    std::wcout << "Game successfully launched." << std::endl;
-    std::wcout << "PID: " << pi.dwProcessId << std::endl;
+    SUCCESS("Game successfully launched.");
+    PRINT("PID: " << pi.dwProcessId);
 
-    std::wcout << "Finding UnityPlayer.dll ..." << std::endl;
+    PRINT("Finding UnityPlayer.dll in memory ...");
+    std::uint8_t retryTimes{ 0 };
     MODULEENTRY32W hUnityPlayer{};
     hUnityPlayer.dwSize = sizeof(hUnityPlayer);
     while (!GetModule(pi.dwProcessId, L"UnityPlayer.dll", &hUnityPlayer)) {
+        ++retryTimes;
+        if (retryTimes >= kMaxRetryTimes) {
+            ERROR("Can't locate the memory address of UnityPlayer.dll, most probably due to the game version or region has not been supported yet.");
+            std::getchar();
+            return EXIT_FAILURE;
+        }
         std::this_thread::sleep_for(100ms);
     }
-    std::wcout << "UnityPlayer.dll found." << std::endl;
-    std::wcout << "UnityPlayer.dll address: " << std::hex << hUnityPlayer.modBaseAddr << std::endl;
+    SUCCESS("UnityPlayer.dll found.");
+    PRINT("UnityPlayer.dll address: 0x" << std::hex << hUnityPlayer.modBaseAddr);
 
-    std::wcout << "Finding UserAssembly.dll ..." << std::endl;
+    PRINT("Finding UserAssembly.dll in memory ...");
+    retryTimes = 0;
     MODULEENTRY32W hUserAssembly{};
     hUserAssembly.dwSize = sizeof(hUserAssembly);
     while (!GetModule(pi.dwProcessId, L"UserAssembly.dll", &hUserAssembly)) {
+        ++retryTimes;
+        if (retryTimes >= kMaxRetryTimes) {
+            ERROR("Can't locate the memory address of UserAssembly.dll, most probably due to the game version or region has not been supported yet.");
+            std::getchar();
+            return EXIT_FAILURE;
+        }
         std::this_thread::sleep_for(100ms);
     }
-    std::wcout << "UserAssembly.dll found." << std::endl;
-    std::wcout << "UserAssembly.dll address: " << std::hex << hUserAssembly.modBaseAddr << std::endl;
+    SUCCESS("UserAssembly.dll found.");
+    PRINT("UserAssembly.dll address: 0x" << std::hex << hUserAssembly.modBaseAddr);
 
     LPVOID mem = ::VirtualAlloc(nullptr, hUnityPlayer.modBaseSize + hUserAssembly.modBaseSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!mem) {
-        std::wcerr << "VirtualAlloc failed: " << GetLastErrorAsString() << std::endl;
+        ERROR("VirtualAlloc failed: " << GetLastErrorAsString());
         std::getchar();
         return EXIT_FAILURE;
     }
 
-    std::wcout << "Reading UnityPlayer.dll's memory ..." << std::endl;
+    PRINT("Reading UnityPlayer.dll's memory ...");
     if (!::ReadProcessMemory(pi.hProcess, hUnityPlayer.modBaseAddr, mem, hUnityPlayer.modBaseSize, nullptr)) {
-        std::wcerr << "ReadProcessMemory failed: " << GetLastErrorAsString() << std::endl;
+        ERROR("ReadProcessMemory failed: " << GetLastErrorAsString());
         std::getchar();
         return EXIT_FAILURE;
     }
-    std::wcout << "UnityPlayer.dll successfully loaded." << std::endl;
+    SUCCESS("UnityPlayer.dll successfully loaded.");
 
-    std::wcout << "Reading UserAssembly.dll's memory ..." << std::endl;
+    PRINT("Reading UserAssembly.dll's memory ...");
     auto ua = reinterpret_cast<LPVOID>(reinterpret_cast<std::uintptr_t>(mem) + hUnityPlayer.modBaseSize);
     if (!::ReadProcessMemory(pi.hProcess, hUserAssembly.modBaseAddr, ua, hUserAssembly.modBaseSize, nullptr)) {
-        std::wcerr << "ReadProcessMemory failed: " << GetLastErrorAsString() << std::endl;
+        ERROR("ReadProcessMemory failed: " << GetLastErrorAsString());
         std::getchar();
         return EXIT_FAILURE;
     }
-    std::wcout << "UserAssembly.dll successfully loaded." << std::endl;
+    SUCCESS("UserAssembly.dll successfully loaded.");
 
-    std::wcout << "Searching for pattern ..." << std::endl;
+    PRINT("Searching for memory pattern ...");
 
-    const bool v4dot3OrGreater = IsGameV4Dot3OrGreater(processPath);
+    static const bool v4dot3OrGreater = IsGameV4Dot3OrGreater(processPath);
     std::uintptr_t address = 0;
     if (v4dot3OrGreater) {
-        std::wcout << "Current game version >= V4.3.0" << std::endl;
+        PRINT("Current game version >= V4.3.0");
         address = PatternScan(ua, "B9 3C 00 00 00 FF 15");
     } else {
-        std::wcout << "Current game version >= V4.0.0 but < V4.3.0" << std::endl;
+        PRINT("Current game version >= V4.0.0 but < V4.3.0");
         address = PatternScan(ua, "E8 ? ? ? ? 85 C0 7E 07 E8 ? ? ? ? EB 05");
     }
     if (!address) {
-        std::wcerr << "Failed to find a necessary memory address. Please tell the author to update this program!" << std::endl;
+        ERROR("Failed to find a necessary memory address. Please inform the author to update this program!");
         std::getchar();
         return EXIT_FAILURE;
     }
@@ -471,7 +554,7 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
         }
         pFPS = rip + *reinterpret_cast<std::int32_t*>(rip + 2) + 6;
         pFPS -= reinterpret_cast<std::uintptr_t>(mem);
-        std::wcout << "FPS offset: " << std::hex << pFPS << std::endl;
+        PRINT("FPS offset: 0x" << std::hex << pFPS);
         pFPS = reinterpret_cast<std::uintptr_t>(hUnityPlayer.modBaseAddr) + pFPS;
     }
 
@@ -485,7 +568,7 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
         std::uint64_t rax = *reinterpret_cast<std::uint32_t*>(rip + 3);
         ppvsync = rip + rax + 7;
         ppvsync -= reinterpret_cast<std::uintptr_t>(mem);
-        std::wcout << "VSync offset: " << std::hex << ppvsync << std::endl;
+        PRINT("VSync offset: 0x" << std::hex << ppvsync);
         ppvsync = reinterpret_cast<std::uintptr_t>(hUnityPlayer.modBaseAddr) + ppvsync;
 
         std::uintptr_t buffer = 0;
@@ -501,7 +584,7 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
 
     ::VirtualFree(mem, 0, MEM_RELEASE);
 
-    std::wcout << "We are DONE here." << std::endl;
+    SUCCESS("We are DONE here.");
 
     DWORD dwExitCode = STILL_ACTIVE;
     while (dwExitCode == STILL_ACTIVE) {
@@ -514,29 +597,29 @@ extern "C" int WINAPI wmain(int argc, wchar_t *argv[])
             continue;
         }
         if (fps != kFPS_TARGET) {
-            std::wcout << "Game FPS is " << std::dec << fps << ". Trying to unlock the limit ..." << std::endl;
+            WARN("Game FPS is " << std::dec << fps << ". Trying to unlock the limit ...");
             if (::WriteProcessMemory(pi.hProcess, reinterpret_cast<LPVOID>(pFPS), &kFPS_TARGET, sizeof(kFPS_TARGET), nullptr)) {
-                std::wcout << "Game FPS is successfully unlocked." << std::endl;
+                SUCCESS("Game FPS is successfully unlocked.");
             } else {
-                std::wcerr << "WriteProcessMemory failed: " << GetLastErrorAsString() << std::endl;
+                ERROR("WriteProcessMemory failed: " << GetLastErrorAsString());
             }
         }
 
         int vsync = -1;
         ::ReadProcessMemory(pi.hProcess, reinterpret_cast<LPVOID>(pVSync), &vsync, sizeof(vsync), nullptr);
         if (vsync != 0) {
-            std::wcout << "VSync is enabled. Trying to disable it ..." << std::endl;
+            WARN("VSync is enabled. Trying to disable it ...");
             vsync = 0;
             if (::WriteProcessMemory(pi.hProcess, reinterpret_cast<LPVOID>(pVSync), &vsync, sizeof(vsync), nullptr)) {
-                std::wcout << "VSync is successfully disabled." << std::endl;
+                SUCCESS("VSync is successfully disabled.");
             } else {
-                std::wcerr << "WriteProcessMemory failed: " << GetLastErrorAsString() << std::endl;
+                ERROR("WriteProcessMemory failed: " << GetLastErrorAsString());
             }
         }
     }
     ::CloseHandle(pi.hProcess);
 
-    std::wcout << "Game closed. Exiting ..." << std::endl;
+    PRINT("Game closed. Exiting ...");
 
     return EXIT_SUCCESS;
 }
